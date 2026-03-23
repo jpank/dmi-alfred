@@ -4,8 +4,8 @@ DMI Cyclist Weather — Alfred Script Filter
 Fetches live DMI observations and outputs Alfred JSON for cyclist-relevant conditions.
 
 Alfred setup:
-  Script Filter → Language: /usr/bin/python3
-  Script: python3 weather.py "{query}"
+  Script Filter → Language: /bin/bash
+  Script: python3 /path/to/weather.py "{query}"
 """
 
 import sys
@@ -25,7 +25,7 @@ STATIONS_CACHE = "/tmp/dmi_stations.json"
 CACHE_MAX_AGE_SECONDS = 86400  # 1 day
 
 BASE_URL = "https://opendataapi.dmi.dk/v2/metObs/collections"
-STATION_URL = f"{BASE_URL}/station/items?limit=500&country=DNK"
+STATION_URL = f"{BASE_URL}/station/items?limit=500"
 OBS_URL = f"{BASE_URL}/observation/items"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
