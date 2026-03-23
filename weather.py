@@ -3,6 +3,9 @@
 DMI Cyclist Weather — Alfred Script Filter
 Fetches live DMI observations and outputs Alfred JSON for cyclist-relevant conditions.
 
+Uses Open-Meteo Geocoding API for city → coordinates (any city worldwide).
+Uses DMI Open Data API for weather observations (Danish stations only).
+
 Alfred setup:
   Script Filter → Language: /bin/bash
   Script: python3 /path/to/weather.py "{query}"
@@ -21,15 +24,14 @@ from datetime import datetime, timezone
 # Constants
 # ---------------------------------------------------------------------------
 
-STATIONS_CACHE = "/tmp/dmi_stations.json"
+# Cache only Synop stations (v2 = new format, busts old cache)
+STATIONS_CACHE = "/tmp/dmi_synop_stations_v2.json"
 CACHE_MAX_AGE_SECONDS = 86400  # 1 day
 
 BASE_URL = "https://opendataapi.dmi.dk/v2/metObs/collections"
 STATION_URL = f"{BASE_URL}/station/items?limit=500"
 OBS_URL = f"{BASE_URL}/observation/items"
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CITY_CSV = os.path.join(SCRIPT_DIR, "dmi_city_list.csv")
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 
 COMPASS_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 COMPASS_NAMES = {
@@ -37,101 +39,18 @@ COMPASS_NAMES = {
     "S": "South", "SW": "Southwest", "W": "West", "NW": "Northwest",
 }
 
-# Short aliases → postcode string (checked before CSV lookup)
+# Query aliases — expanded before geocoding
 ALIASES = {
-    "cph":        "1000",
-    "kbh":        "1000",
-    "copenhagen": "1000",
-    "kobenhavn":  "1000",
-    "københavn":  "1000",
-    "aarhus":     "8000",
-    "arhus":      "8000",
-    "aar":        "8000",
-    "aalborg":    "9000",
-    "aal":        "9000",
-    "odense":     "5000",
-    "esbjerg":    "6700",
-    "randers":    "8900",
-    "horsens":    "8700",
-    "vejle":      "7100",
-    "roskilde":   "4000",
-    "kolding":    "6000",
-    "silkeborg":  "8600",
-    "herning":    "7400",
-    "helsingør":  "3000",
-    "helsingor":  "3000",
-    "hillerød":   "3400",
-    "hillerodd":  "3400",
-    "naestved":   "4700",
-    "næstved":    "4700",
-    "viborg":     "8800",
-    "slagelse":   "4200",
-    "fredericia": "7000",
+    "cph": "Copenhagen",
+    "kbh": "København",
+    "kobenhavn": "København",
+    "aar": "Aarhus",
+    "aal": "Aalborg",
 }
 
-# Postcode → (lat, lon) anchor table for Danish cities.
-# Used to derive approximate coordinates for nearest-station search.
-# Coverage: ~40 anchors spread across Denmark.
-POSTCODE_ANCHORS = {
-    1000: (55.679, 12.571),   # København K
-    2000: (55.679, 12.524),   # Frederiksberg
-    2100: (55.706, 12.578),   # København Ø
-    2200: (55.699, 12.553),   # København N
-    2400: (55.716, 12.524),   # København NV
-    2500: (55.659, 12.503),   # Valby
-    2600: (55.667, 12.400),   # Glostrup
-    2750: (55.726, 12.350),   # Ballerup
-    2800: (55.770, 12.503),   # Kongens Lyngby
-    2900: (55.730, 12.571),   # Hellerup
-    3000: (56.036, 12.613),   # Helsingør
-    3400: (55.930, 12.303),   # Hillerød
-    3600: (55.839, 12.069),   # Frederikssund
-    4000: (55.641, 12.083),   # Roskilde
-    4100: (55.444, 11.789),   # Ringsted
-    4200: (55.403, 11.354),   # Slagelse
-    4300: (55.326, 11.138),   # Korsør
-    4400: (55.681, 11.090),   # Kalundborg
-    4700: (55.229, 11.761),   # Næstved
-    4800: (54.769, 11.874),   # Nykøbing Falster
-    5000: (55.396, 10.388),   # Odense C
-    5700: (55.059, 10.607),   # Svendborg
-    5800: (55.313, 10.789),   # Nyborg
-    6000: (55.490,  9.472),   # Kolding
-    6100: (55.253,  9.489),   # Haderslev
-    6200: (55.044,  9.413),   # Aabenraa
-    6400: (54.910,  9.792),   # Sønderborg
-    6700: (55.477,  8.459),   # Esbjerg
-    6800: (55.620,  8.482),   # Varde
-    7000: (55.566,  9.752),   # Fredericia
-    7100: (55.711,  9.536),   # Vejle
-    7400: (56.133,  8.973),   # Herning
-    7500: (56.357,  8.616),   # Holstebro
-    7700: (56.956,  8.693),   # Thisted
-    7800: (56.567,  9.033),   # Skive
-    8000: (56.157, 10.211),   # Aarhus C
-    8600: (56.168,  9.554),   # Silkeborg
-    8700: (55.860,  9.847),   # Horsens
-    8800: (56.454,  9.402),   # Viborg
-    8900: (56.461, 10.038),   # Randers
-    9000: (57.048,  9.919),   # Aalborg C
-    9400: (56.716,  9.547),   # Nørresundby area
-    9500: (56.641,  9.789),   # Hobro
-    9600: (56.806,  9.513),   # Aars
-    9700: (57.272,  9.972),   # Brønderslev
-    9800: (57.464,  9.983),   # Hjørring
-    9900: (57.440, 10.540),   # Frederikshavn
-    9990: (57.722, 10.582),   # Skagen
-}
-
-
-def postcode_to_coords(postcode: int) -> tuple:
-    """Map a postcode to approximate (lat, lon) using nearest anchor."""
-    if postcode in POSTCODE_ANCHORS:
-        return POSTCODE_ANCHORS[postcode]
-    # Find the anchor with the smallest postcode distance
-    anchors = sorted(POSTCODE_ANCHORS.keys())
-    best = min(anchors, key=lambda a: abs(a - postcode))
-    return POSTCODE_ANCHORS[best]
+# Danish mainland bounding box (excludes Greenland, Faroe Islands)
+DK_LAT_MIN, DK_LAT_MAX = 54.5, 57.8
+DK_LON_MIN, DK_LON_MAX = 7.9, 15.2
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +73,11 @@ def error_item(msg: str, detail: str = "") -> list:
 
 
 def prompt_item() -> list:
-    return [item("prompt", "Type a Danish city or postcode", "e.g. Billund or 7190")]
+    return [item("prompt", "Type a city name", "e.g. Aarhus, København, cph, 8000")]
 
 
 # ---------------------------------------------------------------------------
-# City CSV lookup
+# Geocoding via Open-Meteo (free, no API key)
 # ---------------------------------------------------------------------------
 
 def normalize(s: str) -> str:
@@ -168,61 +87,35 @@ def normalize(s: str) -> str:
     return ascii_s.lower().strip()
 
 
-def load_cities() -> tuple:
-    """Returns (by_name, by_postcode) dicts."""
-    by_name: dict = {}
-    by_postcode: dict = {}
+def resolve_alias(query: str) -> str:
+    """Expand known aliases."""
+    nq = normalize(query)
+    return ALIASES.get(nq, query)
+
+
+def geocode(query: str) -> dict | None:
+    """Geocode a city name via Open-Meteo. Returns {name, lat, lon, country_code} or None."""
+    params = urllib.parse.urlencode({"name": query, "count": 1})
+    url = f"{GEOCODE_URL}?{params}"
     try:
-        with open(CITY_CSV, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(",", 1)
-                if len(parts) != 2:
-                    continue
-                postcode_str = parts[0].strip()
-                city_name = parts[1].strip()
-                entry = (postcode_str, city_name)
-                by_name[normalize(city_name)] = entry
-                by_postcode[postcode_str] = entry
-    except FileNotFoundError:
-        pass
-    return by_name, by_postcode
-
-
-def find_city(query: str, by_name: dict, by_postcode: dict):
-    """Returns (postcode_str, city_name) or None."""
-    q = query.strip()
-
-    # Check alias table first (normalised)
-    nq = normalize(q)
-    if nq in ALIASES:
-        postcode_str = ALIASES[nq]
-        if postcode_str in by_postcode:
-            return by_postcode[postcode_str]
-        # Alias points to a postcode not in CSV — return a synthetic entry
-        return (postcode_str, q.title())
-
-    # Numeric postcode
-    if q.isdigit():
-        return by_postcode.get(q)
-
-    # Exact name match
-    if nq in by_name:
-        return by_name[nq]
-
-    # Prefix / substring match — prefer shortest (closest) match
-    candidates = [(k, v) for k, v in by_name.items() if nq in k]
-    if candidates:
-        candidates.sort(key=lambda x: len(x[0]))
-        return candidates[0][1]
-
-    return None
+        data = fetch_json(url)
+        results = data.get("results")
+        if not results:
+            return None
+        r = results[0]
+        return {
+            "name": r.get("name", query),
+            "lat": r["latitude"],
+            "lon": r["longitude"],
+            "country_code": r.get("country_code", ""),
+            "country": r.get("country", ""),
+        }
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
-# DMI station cache + coordinate-based lookup
+# DMI station cache + coordinate-based lookup (Synop only)
 # ---------------------------------------------------------------------------
 
 def cache_is_fresh() -> bool:
@@ -234,27 +127,50 @@ def cache_is_fresh() -> bool:
 
 
 def fetch_json(url: str) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": "dmi-alfred/2.0 (cyclist weather)"})
+    req = urllib.request.Request(url, headers={"User-Agent": "dmi-alfred/3.0 (cyclist weather)"})
     with urllib.request.urlopen(req, timeout=8) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def load_stations() -> list:
-    """Returns list of station dicts from cache or API."""
+    """Returns list of active Synop station dicts (Danish mainland only), from cache or API."""
     if cache_is_fresh():
         with open(STATIONS_CACHE, encoding="utf-8") as f:
             return json.load(f)
 
     data = fetch_json(STATION_URL)
     stations = []
+    seen = set()
     for feat in data.get("features", []):
         props = feat.get("properties", {})
         coords = feat.get("geometry", {}).get("coordinates", [None, None])
+        lat = coords[1]
+        lon = coords[0]
+
+        # Only Synop stations (full weather instruments)
+        if props.get("type") != "Synop":
+            continue
+        # Only active stations with no end date
+        if props.get("status") != "Active":
+            continue
+        if props.get("validTo") is not None:
+            continue
+        # Only Danish mainland
+        if lat is None or lon is None:
+            continue
+        if not (DK_LAT_MIN <= lat <= DK_LAT_MAX and DK_LON_MIN <= lon <= DK_LON_MAX):
+            continue
+
+        sid = props.get("stationId")
+        if sid in seen:
+            continue
+        seen.add(sid)
+
         stations.append({
-            "stationId": props.get("stationId"),
+            "stationId": sid,
             "name": props.get("name", ""),
-            "lon": coords[0],
-            "lat": coords[1],
+            "lon": lon,
+            "lat": lat,
         })
 
     with open(STATIONS_CACHE, "w", encoding="utf-8") as f:
@@ -263,21 +179,22 @@ def load_stations() -> list:
     return stations
 
 
-def find_nearest_danish_station(lat: float, lon: float, stations: list) -> dict | None:
-    """Find the nearest station within Danish mainland bounds.
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in km."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-    Greenland: lat > 59. Faroe Islands: lat ~62, lon ~ -7.
-    Danish mainland: 54.5–57.8°N, 7.9–15.2°E.
-    """
-    danish = [
-        s for s in stations
-        if s["lat"] is not None and s["lon"] is not None
-        and 54.5 <= s["lat"] <= 57.8
-        and 7.9 <= s["lon"] <= 15.2
-    ]
-    if not danish:
-        return None
-    return min(danish, key=lambda s: (s["lat"] - lat) ** 2 + (s["lon"] - lon) ** 2)
+
+def find_nearest_stations(lat: float, lon: float, stations: list, n: int = 3) -> list:
+    """Return the N nearest stations sorted by distance, with distance_km attached."""
+    for s in stations:
+        s["distance_km"] = haversine_km(lat, lon, s["lat"], s["lon"])
+    return sorted(stations, key=lambda s: s["distance_km"])[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +227,11 @@ def fetch_all_observations(station_id: str) -> dict:
     for param in params_to_fetch:
         results[param] = fetch_observation(station_id, param)
     return results
+
+
+def has_useful_data(obs: dict) -> bool:
+    """Check if observations have at least temperature or wind data."""
+    return obs.get("temp_dry") is not None or obs.get("wind_speed") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -402,42 +324,53 @@ def main():
         alfred_output(prompt_item())
         return
 
-    # City lookup
-    by_name, by_postcode = load_cities()
-    city_match = find_city(query, by_name, by_postcode)
-    if not city_match:
+    # Resolve aliases (cph → Copenhagen, kbh → København, etc.)
+    query = resolve_alias(query)
+
+    # Geocode the query → lat/lon
+    geo = geocode(query)
+    if not geo:
         alfred_output(error_item(
-            f"No city found for \"{query}\"",
-            "Try a Danish city name or 4-digit postcode"
+            f"City not found: \"{query}\"",
+            "Try a city name like Aarhus, København, or cph"
         ))
         return
 
-    postcode_str, city_name = city_match
+    city_name = geo["name"]
+    city_lat = geo["lat"]
+    city_lon = geo["lon"]
+    country_code = geo["country_code"]
 
-    # Derive coordinates for this postcode
-    try:
-        postcode_int = int(postcode_str)
-    except ValueError:
-        postcode_int = 1000  # fallback to Copenhagen
-    city_lat, city_lon = postcode_to_coords(postcode_int)
-
-    # Station lookup — coordinate-based, Danish mainland only
+    # Load Synop stations
     try:
         stations = load_stations()
     except Exception as e:
         alfred_output(error_item("Could not load DMI stations", str(e)))
         return
 
-    station = find_nearest_danish_station(city_lat, city_lon, stations)
-    if not station:
+    if not stations:
+        alfred_output(error_item("No active DMI Synop stations found"))
+        return
+
+    # Find nearest stations and try them in order until one has data
+    nearest = find_nearest_stations(city_lat, city_lon, stations, n=5)
+    station = None
+    obs = None
+    for candidate in nearest:
+        candidate_obs = fetch_all_observations(candidate["stationId"])
+        if has_useful_data(candidate_obs):
+            station = candidate
+            obs = candidate_obs
+            break
+
+    if station is None or obs is None:
         alfred_output(error_item(
-            f"No DMI station found near {city_name}",
-            "Try a nearby city"
+            f"No station with data near {city_name}",
+            "All nearby DMI stations returned empty observations"
         ))
         return
 
-    # Fetch observations
-    obs = fetch_all_observations(station["stationId"])
+    distance_km = station["distance_km"]
 
     temp = obs.get("temp_dry")
     wind_spd = obs.get("wind_speed")
@@ -463,11 +396,16 @@ def main():
 
     rating, narrative = cycling_rating(temp, wind_spd, precip)
 
+    # Distance note for station subtitle
+    dist_note = f"{distance_km:.0f} km away" if distance_km > 5 else "nearby"
+    if distance_km > 100:
+        dist_note = f"⚠ {distance_km:.0f} km away — data may not reflect local conditions"
+
     summary_title = f"{temp_str} — {compass} {wind_str} (gusts {gust_str})"
     rating_emoji = {"GOOD": "✓", "MODERATE": "⚠", "POOR": "✗"}.get(rating.split()[0], "")
-    summary_subtitle = f"{rating_emoji} {rating} · {station['name']} · Updated {now}"
+    summary_subtitle = f"{rating_emoji} {rating} · {station['name']} ({dist_note}) · {now}"
 
-    dmi_url = f"https://www.dmi.dk/lokation/show/DK/{postcode_str}/{urllib.parse.quote(city_name)}/"
+    dmi_url = "https://www.dmi.dk/"
 
     items = [
         item("summary", summary_title, summary_subtitle, arg=dmi_url, valid=True),
