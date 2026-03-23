@@ -37,6 +37,102 @@ COMPASS_NAMES = {
     "S": "South", "SW": "Southwest", "W": "West", "NW": "Northwest",
 }
 
+# Short aliases → postcode string (checked before CSV lookup)
+ALIASES = {
+    "cph":        "1000",
+    "kbh":        "1000",
+    "copenhagen": "1000",
+    "kobenhavn":  "1000",
+    "københavn":  "1000",
+    "aarhus":     "8000",
+    "arhus":      "8000",
+    "aar":        "8000",
+    "aalborg":    "9000",
+    "aal":        "9000",
+    "odense":     "5000",
+    "esbjerg":    "6700",
+    "randers":    "8900",
+    "horsens":    "8700",
+    "vejle":      "7100",
+    "roskilde":   "4000",
+    "kolding":    "6000",
+    "silkeborg":  "8600",
+    "herning":    "7400",
+    "helsingør":  "3000",
+    "helsingor":  "3000",
+    "hillerød":   "3400",
+    "hillerodd":  "3400",
+    "naestved":   "4700",
+    "næstved":    "4700",
+    "viborg":     "8800",
+    "slagelse":   "4200",
+    "fredericia": "7000",
+}
+
+# Postcode → (lat, lon) anchor table for Danish cities.
+# Used to derive approximate coordinates for nearest-station search.
+# Coverage: ~40 anchors spread across Denmark.
+POSTCODE_ANCHORS = {
+    1000: (55.679, 12.571),   # København K
+    2000: (55.679, 12.524),   # Frederiksberg
+    2100: (55.706, 12.578),   # København Ø
+    2200: (55.699, 12.553),   # København N
+    2400: (55.716, 12.524),   # København NV
+    2500: (55.659, 12.503),   # Valby
+    2600: (55.667, 12.400),   # Glostrup
+    2750: (55.726, 12.350),   # Ballerup
+    2800: (55.770, 12.503),   # Kongens Lyngby
+    2900: (55.730, 12.571),   # Hellerup
+    3000: (56.036, 12.613),   # Helsingør
+    3400: (55.930, 12.303),   # Hillerød
+    3600: (55.839, 12.069),   # Frederikssund
+    4000: (55.641, 12.083),   # Roskilde
+    4100: (55.444, 11.789),   # Ringsted
+    4200: (55.403, 11.354),   # Slagelse
+    4300: (55.326, 11.138),   # Korsør
+    4400: (55.681, 11.090),   # Kalundborg
+    4700: (55.229, 11.761),   # Næstved
+    4800: (54.769, 11.874),   # Nykøbing Falster
+    5000: (55.396, 10.388),   # Odense C
+    5700: (55.059, 10.607),   # Svendborg
+    5800: (55.313, 10.789),   # Nyborg
+    6000: (55.490,  9.472),   # Kolding
+    6100: (55.253,  9.489),   # Haderslev
+    6200: (55.044,  9.413),   # Aabenraa
+    6400: (54.910,  9.792),   # Sønderborg
+    6700: (55.477,  8.459),   # Esbjerg
+    6800: (55.620,  8.482),   # Varde
+    7000: (55.566,  9.752),   # Fredericia
+    7100: (55.711,  9.536),   # Vejle
+    7400: (56.133,  8.973),   # Herning
+    7500: (56.357,  8.616),   # Holstebro
+    7700: (56.956,  8.693),   # Thisted
+    7800: (56.567,  9.033),   # Skive
+    8000: (56.157, 10.211),   # Aarhus C
+    8600: (56.168,  9.554),   # Silkeborg
+    8700: (55.860,  9.847),   # Horsens
+    8800: (56.454,  9.402),   # Viborg
+    8900: (56.461, 10.038),   # Randers
+    9000: (57.048,  9.919),   # Aalborg C
+    9400: (56.716,  9.547),   # Nørresundby area
+    9500: (56.641,  9.789),   # Hobro
+    9600: (56.806,  9.513),   # Aars
+    9700: (57.272,  9.972),   # Brønderslev
+    9800: (57.464,  9.983),   # Hjørring
+    9900: (57.440, 10.540),   # Frederikshavn
+    9990: (57.722, 10.582),   # Skagen
+}
+
+
+def postcode_to_coords(postcode: int) -> tuple:
+    """Map a postcode to approximate (lat, lon) using nearest anchor."""
+    if postcode in POSTCODE_ANCHORS:
+        return POSTCODE_ANCHORS[postcode]
+    # Find the anchor with the smallest postcode distance
+    anchors = sorted(POSTCODE_ANCHORS.keys())
+    best = min(anchors, key=lambda a: abs(a - postcode))
+    return POSTCODE_ANCHORS[best]
+
 
 # ---------------------------------------------------------------------------
 # Alfred output helpers
@@ -72,8 +168,8 @@ def normalize(s: str) -> str:
     return ascii_s.lower().strip()
 
 
-def load_cities() -> dict:
-    """Returns {normalized_city_name: (postcode, original_name)} and {postcode_str: (postcode, original_name)}."""
+def load_cities() -> tuple:
+    """Returns (by_name, by_postcode) dicts."""
     by_name: dict = {}
     by_postcode: dict = {}
     try:
@@ -98,24 +194,35 @@ def load_cities() -> dict:
 def find_city(query: str, by_name: dict, by_postcode: dict):
     """Returns (postcode_str, city_name) or None."""
     q = query.strip()
+
+    # Check alias table first (normalised)
+    nq = normalize(q)
+    if nq in ALIASES:
+        postcode_str = ALIASES[nq]
+        if postcode_str in by_postcode:
+            return by_postcode[postcode_str]
+        # Alias points to a postcode not in CSV — return a synthetic entry
+        return (postcode_str, q.title())
+
+    # Numeric postcode
     if q.isdigit():
         return by_postcode.get(q)
 
-    nq = normalize(q)
-    # Exact match
+    # Exact name match
     if nq in by_name:
         return by_name[nq]
-    # Prefix / substring match
+
+    # Prefix / substring match — prefer shortest (closest) match
     candidates = [(k, v) for k, v in by_name.items() if nq in k]
     if candidates:
-        # Prefer shortest name (closest match)
         candidates.sort(key=lambda x: len(x[0]))
         return candidates[0][1]
+
     return None
 
 
 # ---------------------------------------------------------------------------
-# DMI station cache
+# DMI station cache + coordinate-based lookup
 # ---------------------------------------------------------------------------
 
 def cache_is_fresh() -> bool:
@@ -146,7 +253,6 @@ def load_stations() -> list:
         stations.append({
             "stationId": props.get("stationId"),
             "name": props.get("name", ""),
-            "municipality": props.get("municipalityName", ""),
             "lon": coords[0],
             "lat": coords[1],
         })
@@ -157,36 +263,21 @@ def load_stations() -> list:
     return stations
 
 
-def find_station(city_name: str, stations: list) -> dict | None:
-    """Find best matching station for city_name."""
-    nc = normalize(city_name)
+def find_nearest_danish_station(lat: float, lon: float, stations: list) -> dict | None:
+    """Find the nearest station within Danish mainland bounds.
 
-    # 1. Exact municipality match
-    for s in stations:
-        if normalize(s["municipality"]) == nc:
-            return s
-
-    # 2. Station name exact match
-    for s in stations:
-        if normalize(s["name"]) == nc:
-            return s
-
-    # 3. Municipality contains query
-    candidates = [s for s in stations if nc in normalize(s["municipality"])]
-    if candidates:
-        return candidates[0]
-
-    # 4. Station name contains query
-    candidates = [s for s in stations if nc in normalize(s["name"])]
-    if candidates:
-        return candidates[0]
-
-    # 5. Query contains municipality name (for short city names matching large municipalities)
-    candidates = [s for s in stations if normalize(s["municipality"]) in nc]
-    if candidates:
-        return candidates[0]
-
-    return None
+    Greenland: lat > 59. Faroe Islands: lat ~62, lon ~ -7.
+    Danish mainland: 54.5–57.8°N, 7.9–15.2°E.
+    """
+    danish = [
+        s for s in stations
+        if s["lat"] is not None and s["lon"] is not None
+        and 54.5 <= s["lat"] <= 57.8
+        and 7.9 <= s["lon"] <= 15.2
+    ]
+    if not danish:
+        return None
+    return min(danish, key=lambda s: (s["lat"] - lat) ** 2 + (s["lon"] - lon) ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -241,14 +332,14 @@ def wind_chill(temp_c: float, wind_ms: float) -> float | None:
     return round(wc, 1)
 
 
-def beaufort(wind_ms: float) -> tuple[int, str]:
+def beaufort(wind_ms: float) -> tuple:
     """Returns (beaufort_number, label)."""
     thresholds = [
-        (0.3, 0, "Calm"),
-        (1.5, 1, "Light air"),
-        (3.3, 2, "Light breeze"),
-        (5.4, 3, "Gentle breeze"),
-        (7.9, 4, "Moderate breeze"),
+        (0.3,  0, "Calm"),
+        (1.5,  1, "Light air"),
+        (3.3,  2, "Light breeze"),
+        (5.4,  3, "Gentle breeze"),
+        (7.9,  4, "Moderate breeze"),
         (10.7, 5, "Fresh breeze"),
         (13.8, 6, "Strong breeze"),
         (17.1, 7, "Near gale"),
@@ -263,7 +354,7 @@ def beaufort(wind_ms: float) -> tuple[int, str]:
     return 12, "Hurricane force"
 
 
-def cycling_rating(temp: float | None, wind: float | None, precip: float | None) -> tuple[str, str]:
+def cycling_rating(temp: float | None, wind: float | None, precip: float | None) -> tuple:
     """Returns (rating, narrative)."""
     reasons = []
     score = 0  # 0=good, 1=moderate, 2=poor
@@ -274,9 +365,7 @@ def cycling_rating(temp: float | None, wind: float | None, precip: float | None)
             reasons.append(f"Strong wind {wind:.1f} m/s")
         elif wind > 7:
             score = max(score, 1)
-            reasons.append(f"Noticeable headwind {wind:.1f} m/s")
-        else:
-            pass  # fine
+            reasons.append(f"Noticeable wind {wind:.1f} m/s")
 
     if temp is not None:
         if temp < 0:
@@ -325,14 +414,21 @@ def main():
 
     postcode_str, city_name = city_match
 
-    # Station lookup
+    # Derive coordinates for this postcode
+    try:
+        postcode_int = int(postcode_str)
+    except ValueError:
+        postcode_int = 1000  # fallback to Copenhagen
+    city_lat, city_lon = postcode_to_coords(postcode_int)
+
+    # Station lookup — coordinate-based, Danish mainland only
     try:
         stations = load_stations()
     except Exception as e:
         alfred_output(error_item("Could not load DMI stations", str(e)))
         return
 
-    station = find_station(city_name, stations)
+    station = find_nearest_danish_station(city_lat, city_lon, stations)
     if not station:
         alfred_output(error_item(
             f"No DMI station found near {city_name}",
@@ -341,11 +437,7 @@ def main():
         return
 
     # Fetch observations
-    try:
-        obs = fetch_all_observations(station["stationId"])
-    except Exception as e:
-        alfred_output(error_item("DMI API error", str(e)))
-        return
+    obs = fetch_all_observations(station["stationId"])
 
     temp = obs.get("temp_dry")
     wind_spd = obs.get("wind_speed")
@@ -371,7 +463,6 @@ def main():
 
     rating, narrative = cycling_rating(temp, wind_spd, precip)
 
-    # Summary line
     summary_title = f"{temp_str} — {compass} {wind_str} (gusts {gust_str})"
     rating_emoji = {"GOOD": "✓", "MODERATE": "⚠", "POOR": "✗"}.get(rating.split()[0], "")
     summary_subtitle = f"{rating_emoji} {rating} · {station['name']} · Updated {now}"
@@ -388,7 +479,7 @@ def main():
         item(
             "temp",
             f"Temperature: {temp_str} · Feels like {feels_like}",
-            f"Wind chill applies" if wc is not None else "No significant wind chill",
+            "Wind chill applies" if wc is not None else "No significant wind chill",
         ),
         item(
             "precip",
